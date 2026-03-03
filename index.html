@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Forensic Aligner - Scientific Report</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        /* 基础样式 */
+        body { background-color: #0f172a; color: #e2e8f0; touch-action: none; overscroll-behavior: none; user-select: none; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        
+        /* 画布容器 */
+        .canvas-container {
+            position: relative;
+            background: #1e293b;
+            overflow: hidden;
+            border: 1px solid #334155;
+            touch-action: none;
+            background-image: linear-gradient(45deg, #1e293b 25%, #0f172a 25%, #0f172a 75%, #1e293b 75%, #1e293b), 
+                              linear-gradient(45deg, #1e293b 25%, #0f172a 25%, #0f172a 75%, #1e293b 75%, #1e293b);
+            background-position: 0 0, 10px 10px;
+            background-size: 20px 20px;
+            cursor: crosshair;
+        }
+        .canvas-container.panning { cursor: grab; }
+        .canvas-container.panning:active { cursor: grabbing; }
+
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        /* 放大镜 */
+        .magnifier {
+            position: absolute; width: 150px; height: 150px;
+            border: 2px solid #fff; border-radius: 50%;
+            background: #000; pointer-events: none; z-index: 50;
+            display: none; box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .magnifier.active { display: block; }
+        /* 十字准星 */
+        .magnifier::after { content: ''; position: absolute; top:50%; left:50%; width:14px; height:1px; background:rgba(255,0,0,0.8); transform:translate(-50%,-50%); }
+        .magnifier::before { content: ''; position: absolute; top:50%; left:50%; width:1px; height:14px; background:rgba(255,0,0,0.8); transform:translate(-50%,-50%); }
+
+        /* 选点标记 */
+        .marker {
+            position: absolute; width: 20px; height: 20px;
+            transform: translate(-50%, -50%);
+            border: 2px solid #fff; border-radius: 50%;
+            background: rgba(0,0,0,0.2);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; font-weight: bold; color: #fff;
+            pointer-events: auto; z-index: 10; cursor: move;
+        }
+        .marker:hover { border-color: #facc15; transform: translate(-50%, -50%) scale(1.2); transition: transform 0.1s; }
+        .marker.dragging { border-color: #facc15; box-shadow: 0 0 10px #facc15; transform: translate(-50%, -50%) scale(1.2); }
+        
+        /* 颜色选择器 */
+        input[type="color"] { -webkit-appearance: none; border: none; width: 24px; height: 24px; padding: 0; overflow: hidden; border-radius: 4px; cursor: pointer; }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"]::-webkit-color-swatch { border: none; border-radius: 4px; border: 1px solid #475569; }
+
+        /* 模式按钮 */
+        .mode-btn {
+            @apply flex flex-col items-center justify-center py-2 px-4 rounded bg-slate-800 text-slate-400 border border-slate-700 text-[10px] gap-1 transition-all uppercase tracking-wider font-semibold;
+            min-width: 70px;
+        }
+        .mode-btn.active {
+            @apply bg-blue-600 text-white border-blue-500 shadow-lg ring-1 ring-blue-400;
+        }
+        .mode-btn:hover:not(.active) { @apply bg-slate-700 text-slate-200; }
+        
+        .tooltip { @apply absolute bottom-2 right-2 bg-black/70 text-white text-[10px] px-2 py-1 rounded pointer-events-none backdrop-blur-sm border border-white/10; }
+        select { @apply bg-slate-800 text-white text-xs border border-slate-600 rounded px-2 py-1 outline-none focus:border-blue-500; }
+
+        /* 科学标尺样式 */
+        .legend-panel {
+            background: #000; border-top: 1px solid #333; padding: 12px 24px;
+        }
+        .legend-bar-container {
+            width: 100%; position: relative; height: 24px;
+        }
+        .legend-bar {
+            width: 100%; height: 10px; border-radius: 2px;
+            /* background set via JS */
+        }
+        .legend-ticks {
+            display: flex; justify-content: space-between; margin-top: 4px;
+            font-family: 'Courier New', monospace; font-size: 10px; color: #64748b; font-weight: bold;
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen" oncontextmenu="return false;">
+
+    <!-- 顶部导航 (输入界面中文，方便操作) -->
+    <header class="bg-slate-900 border-b border-slate-700 p-2 shrink-0 z-30 flex justify-between items-center h-14 gap-2">
+        <h1 class="text-sm font-bold text-slate-400 flex items-center gap-2 shrink-0">
+            <i class="fa-solid fa-microscope text-blue-400"></i> Forensic Lab
+        </h1>
+        
+        <!-- 算法选择器 -->
+        <div class="flex items-center gap-2 bg-slate-800 p-1 rounded-lg border border-slate-700">
+            <select id="algo-select" onchange="updateAlgoTip()">
+                <option value="affine">多点仿射 (推荐)</option>
+                <option value="perspective">透视变换 (3D)</option>
+                <option value="similarity">刚体变换 (2点)</option>
+            </select>
+        </div>
+
+        <button onclick="calculate()" id="btn-verify" class="bg-blue-600 text-white px-3 py-1.5 rounded text-xs font-bold opacity-50 cursor-not-allowed transition-all hover:bg-blue-500 shrink-0" disabled>
+            <i class="fa-solid fa-flask mr-1"></i>分析
+        </button>
+    </header>
+
+    <!-- 主视窗 (输入/选点) -->
+    <main class="flex-1 flex flex-col md:flex-row relative overflow-hidden" id="input-view">
+        
+        <!-- 大图 -->
+        <div class="flex-1 relative border-b md:border-b-0 md:border-r border-slate-700 group flex flex-col">
+            <div class="absolute top-2 left-2 z-20 flex gap-2 pointer-events-none">
+                <span class="bg-blue-900/80 text-blue-100 px-2 py-1 rounded text-xs border border-blue-700 backdrop-blur-sm">TARGET</span>
+                <span id="badge-target" class="bg-slate-800/80 text-slate-300 px-2 py-1 rounded text-xs border border-slate-600 shadow">0 pts</span>
+            </div>
+            <button onclick="resetView('target')" class="absolute top-2 right-2 z-20 bg-slate-700/80 hover:bg-slate-600 text-white p-1.5 rounded text-xs backdrop-blur border border-slate-500"><i class="fa-solid fa-compress"></i></button>
+            <label id="upload-target" class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-800/40 cursor-pointer hover:bg-slate-800/30 transition-colors">
+                <div class="bg-slate-800 p-4 rounded-full mb-3 shadow-xl ring-1 ring-slate-600"><i class="fa-solid fa-image text-3xl text-blue-400"></i></div>
+                <span class="text-sm font-bold text-slate-300">上传大图 (Target)</span>
+                <input type="file" accept="image/*" onchange="handleImage(this, 'target')" hidden>
+            </label>
+            <div id="wrapper-target" class="canvas-container w-full h-full">
+                <canvas id="canvas-target"></canvas>
+                <div id="magnifier-target" class="magnifier"><canvas></canvas></div>
+            </div>
+        </div>
+
+        <!-- 小图 -->
+        <div class="flex-1 relative group flex flex-col">
+            <div class="absolute top-2 left-2 z-20 flex gap-2 pointer-events-none">
+                <span class="bg-green-900/80 text-green-100 px-2 py-1 rounded text-xs border border-green-700 backdrop-blur-sm">SOURCE</span>
+                <span id="badge-source" class="bg-slate-800/80 text-slate-300 px-2 py-1 rounded text-xs border border-slate-600 shadow">0 pts</span>
+            </div>
+            <button onclick="resetView('source')" class="absolute top-2 right-2 z-20 bg-slate-700/80 hover:bg-slate-600 text-white p-1.5 rounded text-xs backdrop-blur border border-slate-500"><i class="fa-solid fa-compress"></i></button>
+            <label id="upload-source" class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-800/40 cursor-pointer hover:bg-slate-800/30 transition-colors">
+                <div class="bg-slate-800 p-4 rounded-full mb-3 shadow-xl ring-1 ring-slate-600"><i class="fa-solid fa-puzzle-piece text-3xl text-green-400"></i></div>
+                <span class="text-sm font-bold text-slate-300">上传小图 (Source)</span>
+                <input type="file" accept="image/*" onchange="handleImage(this, 'source')" hidden>
+            </label>
+            <div id="wrapper-source" class="canvas-container w-full h-full">
+                <canvas id="canvas-source"></canvas>
+                <div id="magnifier-source" class="magnifier"><canvas></canvas></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 结果视图 (全英文 UI for Screenshot) -->
+    <div id="result-view" class="fixed inset-0 z-50 bg-slate-900 hidden flex flex-col">
+        
+        <!-- 1. 图像区域 (Top) -->
+        <div class="flex-1 relative bg-black overflow-hidden flex items-center justify-center border-b border-gray-800">
+            <canvas id="canvas-result" class="max-w-full max-h-full object-contain"></canvas>
+            
+            <!-- 关闭按钮 -->
+            <button onclick="closeResult()" class="absolute top-4 right-4 bg-slate-800/60 hover:bg-red-600/80 text-white w-8 h-8 rounded-full flex items-center justify-center border border-white/10 shadow-lg transition-all z-50 backdrop-blur-sm">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+            
+            <!-- 算法参数水印 (英文) -->
+            <div class="absolute top-4 left-4 pointer-events-none font-mono text-[10px] leading-tight">
+                <div class="bg-black/70 text-blue-400 px-2 py-1 border-l-2 border-blue-500 mb-1 backdrop-blur-sm">
+                    MODE: <span id="current-algo-display" class="font-bold text-white">PLANAR AFFINE</span>
+                </div>
+                <div class="bg-black/70 text-gray-400 px-2 py-1 border-l-2 border-gray-500 backdrop-blur-sm">
+                    REF POINTS: <span id="points-count-display" class="text-white">4</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. 色谱标尺区域 (Middle - 截图保留区) -->
+        <div id="legend-panel" class="legend-panel hidden">
+            <div class="flex justify-between items-end mb-1">
+                <span class="text-[10px] text-gray-500 font-mono tracking-widest">DISCREPANCY MAP</span>
+                <span class="text-[10px] text-gray-500 font-mono" id="legend-scale-label">NORMALIZED SCALE</span>
+            </div>
+            <div class="legend-bar-container">
+                <div id="legend-bar" class="legend-bar"></div>
+            </div>
+            <div class="legend-ticks">
+                <span class="text-blue-400"><i class="fa-solid fa-check mr-1"></i>MATCH</span>
+                <span class="text-gray-600">|</span>
+                <span class="text-red-500">DEVIATION<i class="fa-solid fa-triangle-exclamation ml-1"></i></span>
+            </div>
+        </div>
+
+        <!-- 3. 控制面板 (Bottom - 截图可裁剪) -->
+        <div class="bg-slate-800 border-t border-slate-700 shrink-0 flex flex-col pb-6 pt-4 px-6 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] z-10">
+            
+            <!-- 模式按钮 -->
+            <div class="flex justify-center gap-4 mb-5">
+                <button onclick="setMode('thermal')" id="mode-thermal" class="mode-btn active">
+                    <i class="fa-solid fa-temperature-three-quarters text-lg mb-1"></i>
+                    THERMAL
+                </button>
+                <button onclick="setMode('magma')" id="mode-magma" class="mode-btn">
+                    <i class="fa-solid fa-fire text-lg mb-1"></i>
+                    MAGMA
+                </button>
+                <button onclick="setMode('highlight')" id="mode-highlight" class="mode-btn">
+                    <i class="fa-solid fa-highlighter text-lg mb-1"></i>
+                    HIGHLIGHT
+                </button>
+                <button onclick="setMode('blend')" id="mode-blend" class="mode-btn">
+                    <i class="fa-solid fa-layer-group text-lg mb-1"></i>
+                    SOURCE
+                </button>
+            </div>
+
+            <!-- 滑块控制 -->
+            <div class="flex items-center gap-4 bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                <span class="text-[10px] font-bold text-slate-400 w-20 text-right tracking-wider uppercase" id="slider-label">GAIN</span>
+                <input type="range" id="main-slider" min="0" max="100" value="50" class="flex-1 h-1.5 bg-slate-700 rounded-lg accent-blue-500 appearance-none cursor-pointer" oninput="updateRender()">
+                
+                <div id="color-picker-container" class="relative group cursor-pointer hidden w-6 h-6">
+                    <input type="color" id="color-picker" value="#00ff00" oninput="updateRender()">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 状态管理 ---
+        const state = {
+            target: { img: null, pts: [], view: { x: 0, y: 0, zoom: 1 } },
+            source: { img: null, pts: [], view: { x: 0, y: 0, zoom: 1 } },
+            interaction: { type: null, mode: null, idx: -1, startX: 0, startY: 0, initialView: {} }, 
+            result: { mode: 'thermal', H_inv: null, width: 0, height: 0, imgW: 0, imgH: 0 }
+        };
+        const colors = ['#ef4444', '#22c55e', '#3b82f6', '#eab308', '#ec4899', '#8b5cf6', '#06b6d4', '#f97316'];
+
+        // --- 初始化 ---
+        ['target', 'source'].forEach(type => {
+            const el = document.getElementById(`wrapper-${type}`);
+            el.addEventListener('pointerdown', e => handlePointerDown(e, type));
+            el.addEventListener('pointermove', e => handlePointerMove(e, type));
+            el.addEventListener('pointerup', e => handlePointerUp(e, type));
+            el.addEventListener('pointerleave', e => handlePointerUp(e, type));
+            el.addEventListener('wheel', e => handleWheel(e, type), { passive: false });
+        });
+        window.addEventListener('contextmenu', e => e.preventDefault());
+
+        function updateAlgoTip() { /* 简化: 输入界面保留默认 */ }
+
+        function handleImage(input, type) {
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = e => {
+                    const img = new Image();
+                    img.onload = () => {
+                        state[type].img = img;
+                        state[type].pts = [];
+                        document.getElementById(`upload-${type}`).classList.add('hidden');
+                        resetView(type);
+                        updateUI();
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(input.files[0]);
+            }
+            input.value = '';
+        }
+
+        function resetView(type) {
+            const img = state[type].img;
+            const wrapper = document.getElementById(`wrapper-${type}`);
+            if (!img || !wrapper) return;
+            const w = wrapper.clientWidth, h = wrapper.clientHeight;
+            const scale = Math.min(w / img.width, h / img.height) * 0.9;
+            state[type].view = { zoom: scale, x: (w - img.width * scale) / 2, y: (h - img.height * scale) / 2 };
+            renderCanvas(type);
+        }
+
+        // --- 交互逻辑 ---
+        function handleWheel(e, type) {
+            e.preventDefault();
+            if (!state[type].img) return;
+            const view = state[type].view;
+            const rect = document.getElementById(`wrapper-${type}`).getBoundingClientRect();
+            const mouseX = e.clientX - rect.left, mouseY = e.clientY - rect.top;
+            const imgX = (mouseX - view.x) / view.zoom, imgY = (mouseY - view.y) / view.zoom;
+            let newZoom = view.zoom * Math.exp(-e.deltaY * 0.001);
+            newZoom = Math.max(0.01, Math.min(newZoom, 100));
+            view.x = mouseX - imgX * newZoom; view.y = mouseY - imgY * newZoom; view.zoom = newZoom;
+            renderCanvas(type);
+            if (state.interaction.mode === 'dragPoint') updateMagnifier(e.clientX, e.clientY, type);
+        }
+
+        function handlePointerDown(e, type) {
+            if (!state[type].img) return;
+            const wrapper = document.getElementById(`wrapper-${type}`);
+            wrapper.setPointerCapture(e.pointerId);
+            const { x: mx, y: my } = getEventPos(e, type);
+            const view = state[type].view;
+
+            if (e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey) {
+                state.interaction = { type, mode: 'pan', startX: e.clientX, startY: e.clientY, initialView: { ...view } };
+                wrapper.classList.add('panning');
+                return;
+            }
+
+            const pts = state[type].pts;
+            let hitIdx = -1;
+            for (let i = 0; i < pts.length; i++) {
+                const sx = view.x + pts[i].x * view.zoom, sy = view.y + pts[i].y * view.zoom;
+                if (Math.hypot(sx - mx, sy - my) < 20) { hitIdx = i; break; }
+            }
+
+            if (hitIdx !== -1) {
+                state.interaction = { type, mode: 'dragPoint', idx: hitIdx };
+                updateMagnifier(e.clientX, e.clientY, type);
+            } else {
+                state[type].pts.push({ x: (mx - view.x)/view.zoom, y: (my - view.y)/view.zoom });
+                state.interaction = { type, mode: 'dragPoint', idx: pts.length - 1 };
+                renderCanvas(type);
+                updateMagnifier(e.clientX, e.clientY, type);
+            }
+            updateUI();
+        }
+
+        function handlePointerMove(e, type) {
+            if (state.interaction.type !== type) return;
+            const mode = state.interaction.mode;
+            if (mode === 'pan') {
+                e.preventDefault();
+                const view = state[type].view;
+                view.x = state.interaction.initialView.x + (e.clientX - state.interaction.startX);
+                view.y = state.interaction.initialView.y + (e.clientY - state.interaction.startY);
+                renderCanvas(type);
+            } else if (mode === 'dragPoint') {
+                e.preventDefault();
+                const { x: mx, y: my } = getEventPos(e, type);
+                const view = state[type].view;
+                state[type].pts[state.interaction.idx] = { x: (mx - view.x)/view.zoom, y: (my - view.y)/view.zoom };
+                renderCanvas(type);
+                updateMagnifier(e.clientX, e.clientY, type);
+            }
+        }
+
+        function handlePointerUp(e, type) {
+            if (state.interaction.type === type) {
+                document.getElementById(`wrapper-${type}`).classList.remove('panning');
+                document.getElementById(`magnifier-${type}`).classList.remove('active');
+                state.interaction = { type: null, mode: null, idx: -1 };
+                renderCanvas(type);
+            }
+        }
+
+        function renderCanvas(type) {
+            const canvas = document.getElementById(`canvas-${type}`);
+            const ctx = canvas.getContext('2d');
+            const img = state[type].img, view = state[type].view;
+            if (!img) return;
+
+            const wrapper = document.getElementById(`wrapper-${type}`);
+            canvas.width = wrapper.clientWidth; canvas.height = wrapper.clientHeight;
+            ctx.imageSmoothingEnabled = view.zoom < 2;
+            ctx.clearRect(0,0,canvas.width,canvas.height);
+            ctx.save();
+            ctx.translate(view.x, view.y); ctx.scale(view.zoom, view.zoom); ctx.drawImage(img, 0, 0); ctx.restore();
+
+            wrapper.querySelectorAll('.marker').forEach(e=>e.remove());
+            state[type].pts.forEach((pt, i) => {
+                const mk = document.createElement('div');
+                mk.className = 'marker';
+                if (state.interaction.mode === 'dragPoint' && state.interaction.idx === i) mk.classList.add('dragging');
+                mk.style.left = (view.x + pt.x*view.zoom) + 'px'; mk.style.top = (view.y + pt.y*view.zoom) + 'px';
+                const color = colors[i % colors.length];
+                mk.style.borderColor = color; mk.style.backgroundColor = color+'40'; mk.innerText = i+1;
+                wrapper.appendChild(mk);
+            });
+        }
+
+        function updateMagnifier(sx, sy, type) {
+            const mag = document.getElementById(`magnifier-${type}`);
+            const ctx = mag.querySelector('canvas').getContext('2d');
+            const img = state[type].img, view = state[type].view;
+            const rect = document.getElementById(`wrapper-${type}`).getBoundingClientRect();
+            mag.classList.add('active');
+            mag.style.left = (sx - rect.left + 20) + 'px'; mag.style.top = (sy - rect.top - 80) + 'px';
+            const size = 150, r = size/8; 
+            mag.querySelector('canvas').width = size; mag.querySelector('canvas').height = size;
+            ctx.fillStyle = '#000'; ctx.fillRect(0,0,size,size);
+            const ix = (sx - rect.left - view.x)/view.zoom, iy = (sy - rect.top - view.y)/view.zoom;
+            try { ctx.drawImage(img, ix-r, iy-r, r*2, r*2, 0,0, size, size); } catch(e){}
+        }
+
+        function getEventPos(e, type) {
+            const rect = document.getElementById(`wrapper-${type}`).getBoundingClientRect();
+            return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        }
+
+        function updateUI() {
+            const tLen = state.target.pts.length, sLen = state.source.pts.length;
+            document.getElementById('badge-target').innerText = `${tLen} pts`; document.getElementById('badge-source').innerText = `${sLen} pts`;
+            const btn = document.getElementById('btn-verify');
+            const algo = document.getElementById('algo-select').value;
+            let needed = 4;
+            if (algo === 'similarity') needed = 2; else if (algo === 'affine') needed = 3;
+            if(tLen < needed || sLen < needed) { btn.disabled=true; btn.classList.add('opacity-50'); btn.innerHTML = `<i class="fa-solid fa-spinner"></i> WAITING INPUT`; }
+            else if (tLen !== sLen) { btn.disabled=true; btn.classList.add('opacity-50'); btn.innerHTML = `MISMATCH COUNT`; }
+            else { btn.disabled=false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); btn.innerHTML = `<i class="fa-solid fa-flask mr-1"></i> ANALYZE`; }
+        }
+
+        // --- 核心算法 ---
+        function calculate() {
+            const algo = document.getElementById('algo-select').value;
+            const src = state.source.pts, dst = state.target.pts;
+            let M = null;
+
+            if (src.length !== dst.length) { alert("Point count mismatch"); return; }
+            if (algo === 'perspective') { if (src.length === 4) M = solveHomographyExact(src, dst); else M = solveHomographyDLT(src, dst); }
+            else if (algo === 'affine') { if (src.length === 3) M = solveAffineExact(src, dst); else M = solveAffineLeastSquares(src, dst); }
+            else if (algo === 'similarity') { M = solveSimilarityLeastSquares(src, dst); }
+
+            if (!M) { alert("Calculation failed. Points may be collinear."); return; }
+            state.result.H_inv = invertMatrix3x3(M);
+            
+            state.result.width = state.target.img.width;
+            state.result.height = state.target.img.height;
+            state.result.imgW = state.source.img.width;
+            state.result.imgH = state.source.img.height;
+            
+            document.getElementById('result-view').classList.remove('hidden');
+            
+            // Set English Info
+            const algoMap = {
+                'affine': 'MULTI-POINT AFFINE',
+                'perspective': 'PERSPECTIVE (DLT)',
+                'similarity': 'RIGID BODY'
+            };
+            document.getElementById('current-algo-display').innerText = algoMap[algo];
+            document.getElementById('points-count-display').innerText = `${src.length}`;
+            
+            setMode('thermal'); // Default
+        }
+
+        // ... (Math functions remain same) ...
+        function solveAffineLeastSquares(src, dst) { const n = src.length; let sumX=0, sumY=0, sumX2=0, sumY2=0, sumXY=0; let sumU=0, sumV=0, sumXU=0, sumYU=0, sumXV=0, sumYV=0; for(let i=0; i<n; i++) { const x = src[i].x, y = src[i].y; const u = dst[i].x, v = dst[i].y; sumX+=x; sumY+=y; sumX2+=x*x; sumY2+=y*y; sumXY+=x*y; sumU+=u; sumV+=v; sumXU+=x*u; sumYU+=y*u; sumXV+=x*v; sumYV+=y*v; } const M = [[sumX2, sumXY, sumX], [sumXY, sumY2, sumY], [sumX, sumY, n]]; const M_inv = invertMatrix3x3(M); if (!M_inv) return null; const rhsX = [sumXU, sumYU, sumU]; const row1 = multiplyMatrixVector(M_inv, rhsX); const rhsY = [sumXV, sumYV, sumV]; const row2 = multiplyMatrixVector(M_inv, rhsY); return [[row1[0], row1[1], row1[2]], [row2[0], row2[1], row2[2]], [0, 0, 1]]; }
+        function solveAffineExact(src, dst) { function solveLin(pSrc, pDstVal) { const D = pSrc[0].x*(pSrc[1].y - pSrc[2].y) + pSrc[1].x*(pSrc[2].y - pSrc[0].y) + pSrc[2].x*(pSrc[0].y - pSrc[1].y); if (Math.abs(D) < 1e-9) return null; const A = (pDstVal[0]*(pSrc[1].y - pSrc[2].y) + pDstVal[1]*(pSrc[2].y - pSrc[0].y) + pDstVal[2]*(pSrc[0].y - pSrc[1].y)) / D; const B = (pSrc[0].x*(pDstVal[1] - pDstVal[2]) + pSrc[1].x*(pDstVal[2] - pDstVal[0]) + pSrc[2].x*(pDstVal[0] - pDstVal[1])) / D; const C = (pSrc[0].x*(pSrc[1].y*pDstVal[2] - pSrc[2].y*pDstVal[1]) + pSrc[1].x*(pSrc[2].y*pDstVal[0] - pSrc[0].y*pDstVal[2]) + pSrc[2].x*(pSrc[0].y*pDstVal[1] - pSrc[1].y*pDstVal[0])) / D; return [A, B, C]; } const coefX = solveLin(src.slice(0,3), [dst[0].x, dst[1].x, dst[2].x]); const coefY = solveLin(src.slice(0,3), [dst[0].y, dst[1].y, dst[2].y]); if(!coefX || !coefY) return null; return [[coefX[0], coefX[1], coefX[2]], [coefY[0], coefY[1], coefY[2]], [0, 0, 1]]; }
+        function solveSimilarityLeastSquares(src, dst) { const n = src.length; let sumX=0, sumY=0, sumU=0, sumV=0; let sumX2Y2=0; let sumXU_YV=0; let sumXV_YU=0; for(let i=0; i<n; i++) { const x = src[i].x, y = src[i].y; const u = dst[i].x, v = dst[i].y; sumX+=x; sumY+=y; sumU+=u; sumV+=v; sumX2Y2 += x*x + y*y; sumXU_YV += x*u + y*v; sumXV_YU += x*v - y*u; } const mx = sumX/n, my = sumY/n, mu = sumU/n, mv = sumV/n; let num_a = 0, num_b = 0, den = 0; for(let i=0; i<n; i++) { const x = src[i].x - mx, y = src[i].y - my; const u = dst[i].x - mu, v = dst[i].y - mv; num_a += x*u + y*v; num_b += x*v - y*u; den += x*x + y*y; } if (den < 1e-9) return null; const a = num_a / den; const b = num_b / den; const tx = mu - (a*mx - b*my); const ty = mv - (b*mx + a*my); return [[a, -b, tx], [b, a, ty], [0, 0, 1]]; }
+        function solveHomographyExact(src, dst) { let sys=[], rhs=[]; for(let i=0;i<4;i++){ let sx=src[i].x, sy=src[i].y, dx=dst[i].x, dy=dst[i].y; sys.push([sx,sy,1,0,0,0,-dx*sx,-dx*sy]); rhs.push(dx); sys.push([0,0,0,sx,sy,1,-dy*sx,-dy*sy]); rhs.push(dy); } const x=solveLinearSystem(sys,rhs); return [[x[0],x[1],x[2]],[x[3],x[4],x[5]],[x[6],x[7],1]]; }
+        function solveHomographyDLT(src, dst) { const normSrc = normalizePoints(src); const normDst = normalizePoints(dst); const n = src.length; const M = new Array(9).fill(0).map(() => new Array(9).fill(0)); for(let k=0; k<n; k++) { const x = normSrc.pts[k].x, y = normSrc.pts[k].y; const u = normDst.pts[k].x, v = normDst.pts[k].y; const r1 = [x, y, 1, 0, 0, 0, -u*x, -u*y, -u]; const r2 = [0, 0, 0, x, y, 1, -v*x, -v*y, -v]; for(let i=0; i<9; i++) { for(let j=0; j<9; j++) { M[i][j] += r1[i]*r1[j] + r2[i]*r2[j]; } } } const M8 = []; const B8 = []; for(let i=0; i<8; i++) { M8[i] = M[i].slice(0, 8); B8[i] = -M[i][8]; } const h_vec = solveLinearSystem(M8, B8); if (!h_vec) return solveHomographyExact(src.slice(0,4), dst.slice(0,4)); const H_norm = [[h_vec[0], h_vec[1], h_vec[2]], [h_vec[3], h_vec[4], h_vec[5]], [h_vec[6], h_vec[7], 1]]; const T_src = normSrc.T; const T_dst_inv = invertMatrix3x3(normDst.T); const H_temp = multiplyMatrices3x3(H_norm, T_src); return multiplyMatrices3x3(T_dst_inv, H_temp); }
+        function normalizePoints(pts) { let cx=0, cy=0; pts.forEach(p => { cx+=p.x; cy+=p.y; }); cx /= pts.length; cy /= pts.length; let distAvg = 0; pts.forEach(p => { distAvg += Math.sqrt((p.x-cx)**2 + (p.y-cy)**2); }); distAvg /= pts.length; const s = Math.sqrt(2) / distAvg; const T = [[s, 0, -s*cx], [0, s, -s*cy], [0, 0, 1]]; const newPts = pts.map(p => ({ x: s*(p.x - cx), y: s*(p.y - cy) })); return { pts: newPts, T }; }
+        function multiplyMatrixVector(m, v) { return [ m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2], m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2], m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2] ]; }
+        function multiplyMatrices3x3(A, B) { const C = [[0,0,0],[0,0,0],[0,0,0]]; for(let i=0; i<3; i++) { for(let j=0; j<3; j++) { for(let k=0; k<3; k++) C[i][j] += A[i][k] * B[k][j]; } } return C; }
+        function solveLinearSystem(A, b) { const n=A.length; const M = A.map(row => [...row]); const rhs = [...b]; for(let i=0;i<n;i++){ let maxEl=Math.abs(M[i][i]), maxRow=i; for(let k=i+1;k<n;k++) if(Math.abs(M[k][i])>maxEl){maxEl=Math.abs(M[k][i]);maxRow=k;} let tmpRow = M[maxRow]; M[maxRow] = M[i]; M[i] = tmpRow; let tmpVal = rhs[maxRow]; rhs[maxRow] = rhs[i]; rhs[i] = tmpVal; if (Math.abs(M[i][i]) < 1e-10) return null; for(let k=i+1;k<n;k++){ let c=-M[k][i]/M[i][i]; for(let j=i;j<n;j++){if(i===j)M[k][j]=0;else M[k][j]+=c*M[i][j];} rhs[k]+=c*rhs[i]; } } const x=new Array(n).fill(0); for(let i=n-1;i>-1;i--){ let sum=0; for(let j=i+1;j<n;j++) sum+=M[i][j]*x[j]; x[i]=(rhs[i]-sum)/M[i][i]; } return x; }
+        function invertMatrix3x3(m) { const det = m[0][0]*(m[1][1]*m[2][2]-m[2][1]*m[1][2]) - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0]) + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]); if (Math.abs(det) < 1e-8) return null; const inv = 1/det; return [ [(m[1][1]*m[2][2]-m[2][1]*m[1][2])*inv, (m[0][2]*m[2][1]-m[0][1]*m[2][2])*inv, (m[0][1]*m[1][2]-m[0][2]*m[1][1])*inv], [(m[1][2]*m[2][0]-m[1][0]*m[2][2])*inv, (m[0][0]*m[2][2]-m[0][2]*m[2][0])*inv, (m[1][0]*m[0][2]-m[0][0]*m[1][2])*inv], [(m[1][0]*m[2][1]-m[2][0]*m[1][1])*inv, (m[2][0]*m[0][1]-m[0][0]*m[2][1])*inv, (m[0][0]*m[1][1]-m[1][0]*m[0][1])*inv] ]; }
+
+        // --- Result View / Render Logic ---
+        function setMode(mode) {
+            state.result.mode = mode;
+            document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(`mode-${mode}`).classList.add('active');
+            
+            const slider = document.getElementById('main-slider');
+            const label = document.getElementById('slider-label');
+            const cp = document.getElementById('color-picker-container');
+            const legend = document.getElementById('legend-panel');
+            const legendBar = document.getElementById('legend-bar');
+
+            // Reset visibility
+            cp.classList.add('hidden');
+            legend.classList.add('hidden');
+
+            if (mode === 'highlight') { 
+                slider.value = 30; label.innerText = "SENSITIVITY"; cp.classList.remove('hidden');
+            } else if (mode === 'thermal') { 
+                slider.value = 50; label.innerText = "GAIN"; 
+                legend.classList.remove('hidden');
+                legendBar.style.background = 'linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000)';
+            } else if (mode === 'magma') { 
+                slider.value = 60; label.innerText = "EXPOSURE";
+                legend.classList.remove('hidden');
+                legendBar.style.background = 'linear-gradient(to right, #000000, #5c0067, #b5004e, #ff8c00, #ffffff)';
+            } else if (mode === 'blend') { 
+                slider.value = 50; label.innerText = "OPACITY";
+            }
+            updateRender();
+        }
+
+        function updateRender() {
+            if (!state.result.H_inv) return;
+            const canvas = document.getElementById('canvas-result');
+            const ctx = canvas.getContext('2d');
+            const w = state.result.width, h = state.result.height;
+            canvas.width = w; canvas.height = h;
+
+            const sliderVal = parseInt(document.getElementById('main-slider').value);
+            const hexColor = document.getElementById('color-picker').value;
+            const rUser = parseInt(hexColor.slice(1,3), 16), gUser = parseInt(hexColor.slice(3,5), 16), bUser = parseInt(hexColor.slice(5,7), 16);
+
+            ctx.drawImage(state.target.img, 0, 0);
+            const dstData = ctx.getImageData(0,0,w,h);
+            
+            const srcTemp = document.createElement('canvas');
+            srcTemp.width = state.result.imgW; srcTemp.height = state.result.imgH;
+            srcTemp.getContext('2d').drawImage(state.source.img, 0, 0);
+            const srcData = srcTemp.getContext('2d').getImageData(0,0,srcTemp.width, srcTemp.height);
+            
+            const finalData = ctx.createImageData(w,h);
+            const H_inv = state.result.H_inv;
+            const sw = srcTemp.width, sh = srcTemp.height;
+            const mode = state.result.mode;
+
+            for(let i=0; i<dstData.data.length; i+=4) {
+                const idx = i/4;
+                const x = idx % w, y = Math.floor(idx / w);
+                const rT = dstData.data[i], gT = dstData.data[i+1], bT = dstData.data[i+2];
+
+                // Warp
+                const u_p = H_inv[0][0]*x + H_inv[0][1]*y + H_inv[0][2];
+                const v_p = H_inv[1][0]*x + H_inv[1][1]*y + H_inv[1][2];
+                const w_p = H_inv[2][0]*x + H_inv[2][1]*y + H_inv[2][2];
+                const u = Math.round(u_p/w_p), v = Math.round(v_p/w_p);
+
+                let rS=0, gS=0, bS=0, aS=0;
+                if(u>=0 && u<sw && v>=0 && v<sh) {
+                    const sIdx = (v*sw + u)*4;
+                    rS=srcData.data[sIdx]; gS=srcData.data[sIdx+1]; bS=srcData.data[sIdx+2]; aS=255;
+                }
+
+                if (aS === 0) {
+                    finalData.data[i]=rT; finalData.data[i+1]=gT; finalData.data[i+2]=bT; finalData.data[i+3]=255;
+                    continue;
+                }
+
+                const diff = (Math.abs(rT-rS)+Math.abs(gT-gS)+Math.abs(bT-bS))/3;
+                
+                if (mode === 'highlight') {
+                    if (diff > sliderVal) {
+                        finalData.data[i]=rUser; finalData.data[i+1]=gUser; finalData.data[i+2]=bUser; finalData.data[i+3]=255;
+                    } else {
+                        const gray = rT*0.3+gT*0.59+bT*0.11;
+                        finalData.data[i]=gray*0.5; finalData.data[i+1]=gray*0.5; finalData.data[i+2]=gray*0.5; finalData.data[i+3]=255;
+                    }
+                } else if (mode === 'thermal') {
+                    const gain = 1 + (sliderVal - 50) / 20; 
+                    let val = (diff / 255.0) * (3 * gain); 
+                    if (val > 1) val = 1;
+                    let r=0, g=0, b=0;
+                    if (val < 0.25) { r=0; g=val*4*255; b=255; } 
+                    else if (val < 0.5) { r=0; g=255; b=(1-(val-0.25)*4)*255; } 
+                    else if (val < 0.75) { r=(val-0.5)*4*255; g=255; b=0; } 
+                    else { r=255; g=(1-(val-0.75)*4)*255; b=0; }
+                    
+                    if (diff < 5) {
+                         const gray = (rT+gT+bT)/3 * 0.3;
+                         finalData.data[i]=gray; finalData.data[i+1]=gray; finalData.data[i+2]=gray+20; finalData.data[i+3]=255;
+                    } else {
+                        finalData.data[i]=r; finalData.data[i+1]=g; finalData.data[i+2]=b; finalData.data[i+3]=255;
+                    }
+                } else if (mode === 'magma') {
+                    const gain = 1 + (sliderVal - 50) / 25;
+                    let val = (diff / 255.0) * (4 * gain);
+                    if (val > 1) val = 1;
+                    let r=0, g=0, b=0;
+                    if (val < 0.33) { let t = val * 3; r=t*80; g=0; b=t*120; } 
+                    else if (val < 0.66) { let t = (val-0.33) * 3; r=80 + t*(255-80); g=t*100; b=120 - t*120; } 
+                    else { let t = (val-0.66) * 3; r=255; g=100 + t*155; b=t*255; }
+                    finalData.data[i]=r; finalData.data[i+1]=g; finalData.data[i+2]=b; finalData.data[i+3]=255;
+                } else if (mode === 'blend') {
+                    const alpha = sliderVal/100;
+                    finalData.data[i]=rT*(1-alpha)+rS*alpha; finalData.data[i+1]=gT*(1-alpha)+gS*alpha; finalData.data[i+2]=bT*(1-alpha)+bS*alpha; finalData.data[i+3]=255;
+                }
+            }
+            ctx.putImageData(finalData, 0, 0);
+        }
+
+        function closeResult() { document.getElementById('result-view').classList.add('hidden'); }
+    </script>
+</body>
+</html>
